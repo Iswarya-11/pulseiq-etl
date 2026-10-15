@@ -3,10 +3,10 @@ import pandas as pd
 
 def validate_date_order(
     df,
-    joining_column="joining_date",
-    leaving_column="leaving_date",
+    joining_column="hire_date",
+    leaving_column="exit_date",
 ):
-    """Separate rows where leaving date is before joining date."""
+    """Reject employees whose exit date is before their hire date."""
     df = df.copy()
 
     if joining_column not in df.columns:
@@ -36,11 +36,8 @@ def validate_date_order(
     return accepted, rejected
 
 
-def validate_nonnegative(
-    df,
-    column,
-):
-    """Separate rows with negative numeric values."""
+def validate_nonnegative(df, column):
+    """Reject rows with negative numeric values."""
     df = df.copy()
 
     if column not in df.columns:
