@@ -1,0 +1,10 @@
+services:
+  etl:
+    build: .
+    container_name: pulseiq-etl
+    volumes:
+      - ./data:/app/data
+      - ./clean:/app/clean
+      - ./rejected:/app/rejected
+      - ./logs:/app/logs
+      
