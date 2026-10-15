@@ -2,7 +2,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
+RAW_DIR = PROJECT_ROOT / "raw"
 CLEAN_DIR = PROJECT_ROOT / "clean"
 REJECTED_DIR = PROJECT_ROOT / "rejected"
 LOG_DIR = PROJECT_ROOT / "logs"
