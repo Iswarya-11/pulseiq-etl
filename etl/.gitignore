@@ -1,9 +1,0 @@
-data/raw/
-clean/
-rejected/
-logs/
-__pycache__/
-.pytest_cache/
-.venv/
-venv/
-*.pyc
