@@ -7,3 +7,10 @@ __pycache__/
 .venv/
 venv/
 *.pyc
+# Raw source datasets
+raw/
+
+# Generated ETL outputs
+clean/
+rejected/
+logs/

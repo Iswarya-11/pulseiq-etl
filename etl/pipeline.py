@@ -1,15 +1,18 @@
+
 from datetime import datetime
 import logging
 
 import pandas as pd
+import pandera.pandas as pa
 
 from etl.config import (
-    RAW_DIR,
     CLEAN_DIR,
     REJECTED_DIR,
     LOG_DIR,
     MASTER_WORKBOOK,
+    PYTHON_EXPORT_WORKBOOK,
     SHEETS_TO_PROCESS,
+    PYTHON_EXPORT_SHEETS,
 )
 from etl.cleaning import clean_column_names, remove_duplicates
 from etl.validation import validate_date_order
@@ -30,6 +33,7 @@ DATE_COLUMNS = [
     "decided_on",
     "effective_from",
     "effective_to",
+    "observation_date",
 ]
 
 NONNEGATIVE_COLUMNS = {
@@ -43,11 +47,25 @@ NONNEGATIVE_COLUMNS = {
     "salary_structures": ["monthly_amount"],
     "attendance": ["hours_worked", "overtime_hours"],
     "leave_requests": ["days"],
+    "payroll_monthly_features": [
+        "monthly_fixed_gross",
+        "overtime_pay",
+        "variable_pay",
+        "gross_pay",
+        "net_pay",
+        "total_deductions",
+    ],
+    "attendance_monthly_features": [
+        "scheduled_days",
+        "present_days",
+        "overtime_hours",
+    ],
 }
 
 
 def setup_logging():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+
     logging.basicConfig(
         filename=LOG_DIR / "etl.log",
         level=logging.INFO,
@@ -56,49 +74,39 @@ def setup_logging():
     )
 
 
-def save_rejected(sheet_name, rejected):
+def save_rejected(name, rejected):
     if rejected.empty:
         return
 
     REJECTED_DIR.mkdir(parents=True, exist_ok=True)
-    output = REJECTED_DIR / f"{sheet_name}.csv"
-
-    if output.exists():
-        previous = pd.read_csv(output)
-        rejected = pd.concat(
-            [previous, rejected], ignore_index=True
-        )
-
-    rejected.to_csv(output, index=False)
+    path = REJECTED_DIR / f"{name}.csv"
+    rejected.to_csv(path, index=False)
 
 
-def add_date_helpers(df):
+def add_helpers(df):
     df = df.copy()
 
-    if "attendance_date" in df.columns:
-        dates = pd.to_datetime(
-            df["attendance_date"], errors="coerce"
-        )
-        df["month"] = dates.dt.month
-        df["year"] = dates.dt.year
+    date_source = None
 
-    elif "period_start" in df.columns:
-        dates = pd.to_datetime(
-            df["period_start"], errors="coerce"
-        )
-        df["month"] = dates.dt.month
+    for candidate in ("attendance_date", "period_start", "month"):
+        if candidate in df.columns:
+            date_source = candidate
+            break
+
+    if date_source:
+        dates = pd.to_datetime(df[date_source], errors="coerce")
+        df["month_number"] = dates.dt.month
         df["year"] = dates.dt.year
 
     if "hire_date" in df.columns:
-        hire = pd.to_datetime(
-            df["hire_date"], errors="coerce"
-        )
-        end = pd.to_datetime(
-            df.get("exit_date", pd.Series(
-                pd.NaT, index=df.index
-            )),
-            errors="coerce",
-        )
+        hire = pd.to_datetime(df["hire_date"], errors="coerce")
+
+        if "exit_date" in df.columns:
+            end = pd.to_datetime(df["exit_date"], errors="coerce")
+        else:
+            end = pd.Series(pd.NaT, index=df.index)
+
+        # Use today's date for employees who have not exited.
         end = end.fillna(pd.Timestamp.today().normalize())
 
         df["tenure_days"] = (end - hire).dt.days.clip(lower=0)
@@ -106,11 +114,48 @@ def add_date_helpers(df):
     return df
 
 
-def process_sheet(sheet_name, employee_ids=None):
-    df = pd.read_excel(
-        MASTER_WORKBOOK,
-        sheet_name=sheet_name,
-    )
+def pandera_check(df, name):
+    checks = []
+
+    if name == "employees" and "employee_id" in df.columns:
+        checks.append(
+            pa.Check(
+                lambda frame: frame["employee_id"].is_unique,
+                error="employee_id values must be unique",
+            )
+        )
+
+    for column in NONNEGATIVE_COLUMNS.get(name, []):
+        if column in df.columns:
+            checks.append(
+                pa.Check(
+                    lambda frame, col=column: (
+                        pd.to_numeric(frame[col], errors="coerce")
+                        .dropna()
+                        .ge(0)
+                        .all()
+                    ),
+                    error=f"{column} must be nonnegative",
+                )
+            )
+
+    if checks:
+        schema = pa.DataFrameSchema(
+            checks=checks,
+            strict=False,
+        )
+        schema.validate(df, lazy=True)
+
+    return df
+
+
+def process_sheet(
+    workbook,
+    sheet_name,
+    employee_ids=None,
+    check_employee_refs=False,
+):
+    df = pd.read_excel(workbook, sheet_name=sheet_name)
     input_rows = len(df)
 
     df = clean_column_names(df)
@@ -118,90 +163,107 @@ def process_sheet(sheet_name, employee_ids=None):
 
     rejected_frames = []
 
-    # Reject rows with missing employee IDs.
+    def reject_rows(mask, reason):
+        nonlocal df
+
+        mask = mask.fillna(False)
+
+        if mask.any():
+            bad = df.loc[mask].copy()
+            bad["rejection_reason"] = reason
+            rejected_frames.append(bad)
+            df = df.loc[~mask].copy()
+
+    # Reject missing employee IDs.
     if "employee_id" in df.columns:
-        missing_id = df["employee_id"].isna()
-        if missing_id.any():
-            rejected = df.loc[missing_id].copy()
-            rejected["rejection_reason"] = "missing employee_id"
-            rejected_frames.append(rejected)
-            df = df.loc[~missing_id].copy()
+        reject_rows(
+            df["employee_id"].isna(),
+            "missing employee_id",
+        )
 
-    # Employee IDs must be unique in the employee master.
+    # Reject duplicate employee IDs in the employee master.
     if sheet_name == "employees" and "employee_id" in df.columns:
-        duplicate_id = df["employee_id"].duplicated(keep="first")
-        if duplicate_id.any():
-            rejected = df.loc[duplicate_id].copy()
-            rejected["rejection_reason"] = (
-                "duplicate employee_id"
-            )
-            rejected_frames.append(rejected)
-            df = df.loc[~duplicate_id].copy()
+        reject_rows(
+            df["employee_id"].duplicated(keep="first"),
+            "duplicate employee_id",
+        )
 
-    # Fact records must refer to a known employee.
+    # Check employee references in master workbook tables.
     if (
-        sheet_name != "employees"
+        check_employee_refs
+        and sheet_name != "employees"
         and employee_ids is not None
         and "employee_id" in df.columns
     ):
-        unknown_id = ~df["employee_id"].isin(employee_ids)
-        if unknown_id.any():
-            rejected = df.loc[unknown_id].copy()
-            rejected["rejection_reason"] = (
-                "employee_id not found in employees"
-            )
-            rejected_frames.append(rejected)
-            df = df.loc[~unknown_id].copy()
+        reject_rows(
+            ~df["employee_id"].isin(employee_ids),
+            "employee_id not found in employees",
+        )
 
-    # Convert recognized date columns.
+    # Validate date values.
     for column in DATE_COLUMNS:
         if column in df.columns:
-            df[column] = pd.to_datetime(
-                df[column], errors="coerce"
+            original = df[column]
+            converted = pd.to_datetime(original, errors="coerce")
+
+            invalid = original.notna() & converted.isna()
+
+            reject_rows(
+                invalid,
+                f"invalid date in {column}",
             )
 
-    # Reject invalid hire/exit or start/end date order.
-    date_pairs = [
+            df[column] = pd.to_datetime(
+                df[column],
+                errors="coerce",
+            )
+
+    # Reject invalid date ranges.
+    for start_col, end_col in [
         ("hire_date", "exit_date"),
         ("start_date", "end_date"),
-    ]
-
-    for start_col, end_col in date_pairs:
+    ]:
         if start_col in df.columns and end_col in df.columns:
-            df, rejected = validate_date_order(
+            df, bad = validate_date_order(
                 df,
                 joining_column=start_col,
                 leaving_column=end_col,
             )
-            if not rejected.empty:
-                rejected_frames.append(rejected)
 
-    # Reject rows with negative values in specified measures.
+            if not bad.empty:
+                rejected_frames.append(bad)
+
+    # Reject negative values in relevant columns.
     for column in NONNEGATIVE_COLUMNS.get(sheet_name, []):
         if column in df.columns:
-            values = pd.to_numeric(df[column], errors="coerce")
-            invalid = values.notna() & (values < 0)
+            values = pd.to_numeric(
+                df[column],
+                errors="coerce",
+            )
 
-            if invalid.any():
-                rejected = df.loc[invalid].copy()
-                rejected["rejection_reason"] = (
-                    f"negative value in {column}"
-                )
-                rejected_frames.append(rejected)
-                df = df.loc[~invalid].copy()
+            reject_rows(
+                values.notna() & (values < 0),
+                f"negative value in {column}",
+            )
 
-    df = add_date_helpers(df)
+    # Validate accepted rows using Pandera.
+    pandera_check(df, sheet_name)
+
+    df = add_helpers(df)
 
     CLEAN_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(CLEAN_DIR / f"{sheet_name}.csv", index=False)
+    df.to_csv(
+        CLEAN_DIR / f"{sheet_name}.csv",
+        index=False,
+    )
 
-    if rejected_frames:
-        rejected_all = pd.concat(
-            rejected_frames, ignore_index=True
-        )
-        save_rejected(sheet_name, rejected_all)
-    else:
-        rejected_all = pd.DataFrame()
+    rejected_all = (
+        pd.concat(rejected_frames, ignore_index=True)
+        if rejected_frames
+        else pd.DataFrame()
+    )
+
+    save_rejected(sheet_name, rejected_all)
 
     logging.info(
         "%s | input=%s | output=%s | rejected=%s",
@@ -221,33 +283,51 @@ def process_sheet(sheet_name, employee_ids=None):
 
 def main():
     setup_logging()
-    start_time = datetime.now()
 
-    logging.info("ETL run started at %s", start_time.isoformat())
+    started = datetime.now()
 
-    if not MASTER_WORKBOOK.exists():
-        raise FileNotFoundError(
-            f"Master workbook not found: {MASTER_WORKBOOK}"
-        )
+    logging.info(
+        "ETL run started at %s",
+        started.isoformat(),
+    )
+
+    for workbook in (MASTER_WORKBOOK, PYTHON_EXPORT_WORKBOOK):
+        if not workbook.exists():
+            raise FileNotFoundError(
+                f"Workbook not found: {workbook}"
+            )
 
     CLEAN_DIR.mkdir(parents=True, exist_ok=True)
     REJECTED_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Clear previous outputs so repeated runs are reproducible.
+    # Remove previous CSV outputs to avoid stale files.
     for folder in (CLEAN_DIR, REJECTED_DIR):
         for old_file in folder.glob("*.csv"):
             old_file.unlink()
 
     employee_ids = None
 
+    # Process the master workbook.
     for sheet_name in SHEETS_TO_PROCESS:
         cleaned = process_sheet(
+            MASTER_WORKBOOK,
             sheet_name,
             employee_ids=employee_ids,
+            check_employee_refs=True,
         )
 
         if sheet_name == "employees":
-            employee_ids = set(cleaned["employee_id"].dropna())
+            employee_ids = set(
+                cleaned["employee_id"].dropna()
+            )
+
+    # Process selected Python export workbook sheets.
+    for sheet_name in PYTHON_EXPORT_SHEETS:
+        process_sheet(
+            PYTHON_EXPORT_WORKBOOK,
+            sheet_name,
+        )
 
     logging.info(
         "ETL run completed at %s",

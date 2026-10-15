@@ -1,3 +1,4 @@
+
 services:
   etl:
     build: .
@@ -7,3 +8,5 @@ services:
       - ./clean:/app/clean
       - ./rejected:/app/rejected
       - ./logs:/app/logs
+      - ./docs:/app/docs
+      - ./tests:/app/tests
