@@ -27,3 +27,22 @@ Limitations
 - Sample data may not reflect real workforce behaviour.
 - Raw counts can be affected by employee numbers and scheduled working days.
 - A single year's seasonal pattern should not be treated as conclusive.
+
+
+Dashboard layout
+- Current Headcount: shows 441 employees as of September 2026.
+- Monthly Headcount Trend: tracks headcount changes over time.
+- Department-wise Employee Count: compares headcount across departments.
+- Employee Tenure Distribution: shows the tenure of active employees.
+- Role Mix - Current Employees: shows the distribution of active employees by role.
+- Monthly Joiners vs Leavers: compares monthly hires and exits.
+
+Filters and usability
+- Department and Date Range native filters apply to all six charts.
+- Use chronological ordering for monthly charts.
+- Keep chart titles clear and include concise takeaways.
+
+Limitations
+- Sample workforce data may not reflect real workforce behaviour.
+- Headcount figures and trends depend on the available reporting period and dataset definitions.
+
