@@ -2,3 +2,4 @@ pandas
 openpyxl
 pandera
 pytest
+psycopg2-binary
