@@ -28,5 +28,31 @@ services:
       timeout: 5s
       retries: 10
 
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    container_name: pulseiq-superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: "pulseiq-local-secret-key-change-before-deployment-2026"
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        superset db upgrade &&
+        (superset fab create-admin --username admin --firstname Admin --lastname User --email admin@example.com --password 'Admin#2026' || true) &&
+        superset init &&
+        /usr/bin/run-server.sh
+
 volumes:
   postgres_data:
+  superset_home:
