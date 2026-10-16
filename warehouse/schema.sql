@@ -74,11 +74,35 @@ CREATE TABLE IF NOT EXISTS dw.dim_employee (
     valid_to DATE,
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
     change_reason TEXT,
-    CONSTRAINT uq_employee_version UNIQUE (employee_id, valid_from),
+    CONSTRAINT uq_employee_version
+        UNIQUE (employee_id, valid_from),
     CONSTRAINT ck_employee_valid_dates
         CHECK (valid_to IS NULL OR valid_to >= valid_from)
 );
 
+-- Daily attendance: one row per employee per day.
+CREATE TABLE IF NOT EXISTS dw.fact_attendance (
+    attendance_id TEXT PRIMARY KEY,
+    employee_id TEXT NOT NULL,
+    employee_key BIGINT REFERENCES dw.dim_employee(employee_key),
+    date_key INTEGER REFERENCES dw.dim_date(date_key),
+    attendance_date DATE NOT NULL,
+    department_id TEXT,
+    weekday TEXT,
+    status TEXT,
+    leave_type_code TEXT REFERENCES dw.dim_leave_type(leave_type_code),
+    check_in TEXT,
+    check_out TEXT,
+    hours_worked NUMERIC(8,2),
+    overtime_hours NUMERIC(8,2),
+    late_flag TEXT,
+    source TEXT,
+    data_quality_flag TEXT,
+    CONSTRAINT uq_attendance_employee_day
+        UNIQUE (employee_id, attendance_date)
+);
+
+-- Retained monthly attendance summary for existing analytics.
 CREATE TABLE IF NOT EXISTS dw.fact_attendance_monthly (
     attendance_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     employee_id TEXT NOT NULL,
@@ -100,6 +124,7 @@ CREATE TABLE IF NOT EXISTS dw.fact_attendance_monthly (
         UNIQUE (employee_id, period_end_date)
 );
 
+-- Payroll: one row per employee per payroll month.
 CREATE TABLE IF NOT EXISTS dw.fact_payroll (
     payroll_item_id TEXT PRIMARY KEY,
     run_id TEXT,
@@ -133,7 +158,9 @@ CREATE TABLE IF NOT EXISTS dw.fact_payroll (
     pf_employer NUMERIC(14,2),
     esi_employer NUMERIC(14,2),
     employer_cost NUMERIC(14,2),
-    headcount_flag INTEGER
+    headcount_flag INTEGER,
+    CONSTRAINT uq_payroll_employee_month
+        UNIQUE (employee_id, period_end_date)
 );
 
 CREATE TABLE IF NOT EXISTS dw.fact_leave (
@@ -168,13 +195,20 @@ CREATE TABLE IF NOT EXISTS dw.fact_headcount_monthly (
     PRIMARY KEY (month_start_date, department_id)
 );
 
+-- Indexes for common joins and date filters.
 CREATE INDEX IF NOT EXISTS idx_employee_business_id
     ON dw.dim_employee(employee_id);
 
 CREATE INDEX IF NOT EXISTS idx_employee_current
     ON dw.dim_employee(employee_id, is_current);
 
-CREATE INDEX IF NOT EXISTS idx_attendance_period
+CREATE INDEX IF NOT EXISTS idx_attendance_employee_date
+    ON dw.fact_attendance(employee_id, attendance_date);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_date
+    ON dw.fact_attendance(attendance_date);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_monthly_period
     ON dw.fact_attendance_monthly(period_end_date);
 
 CREATE INDEX IF NOT EXISTS idx_payroll_period
@@ -182,6 +216,9 @@ CREATE INDEX IF NOT EXISTS idx_payroll_period
 
 CREATE INDEX IF NOT EXISTS idx_payroll_run
     ON dw.fact_payroll(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_payroll_employee_month
+    ON dw.fact_payroll(employee_id, period_end_date);
 
 CREATE INDEX IF NOT EXISTS idx_leave_dates
     ON dw.fact_leave(start_date, end_date);

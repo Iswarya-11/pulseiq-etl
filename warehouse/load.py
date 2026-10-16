@@ -1,6 +1,5 @@
 
 import os
-import glob
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
@@ -104,7 +103,6 @@ def employee_key_for(cur, employee_id, on_date):
 def load_dimensions(cur):
     print("Loading dimensions...")
 
-    # Department dimension: use the star-schema reference.
     departments = pd.read_excel(STAR, sheet_name="dim_department")
     departments = departments[
         [
@@ -132,9 +130,7 @@ def load_dimensions(cur):
         ],
     )
 
-    # Role dimension.
     roles = pd.read_excel(STAR, sheet_name="dim_role")
-    roles = roles.rename(columns={"band_reference_year": "band_reference_year"})
     role_columns = [
         "role_id", "department_id", "role_title", "level", "grade",
         "band_min_annual", "band_mid_annual", "band_max_annual",
@@ -151,11 +147,12 @@ def load_dimensions(cur):
         role_columns[1:],
     )
 
-    # Date dimension.
     dates = pd.read_excel(STAR, sheet_name="dim_date")
     dates = dates.rename(columns={"date": "full_date"})
 
-    for column in ["is_weekend", "is_holiday", "is_working_day", "is_month_end"]:
+    for column in [
+        "is_weekend", "is_holiday", "is_working_day", "is_month_end"
+    ]:
         dates[column] = dates[column].map(truth)
 
     date_columns = [
@@ -175,7 +172,6 @@ def load_dimensions(cur):
         date_columns[1:],
     )
 
-    # Leave type dimension.
     leave_types = pd.read_excel(MASTER, sheet_name="leave_types")
     for column in ["prorated_for_joiners", "carry_forward_allowed"]:
         leave_types[column] = leave_types[column].map(truth)
@@ -195,7 +191,6 @@ def load_dimensions(cur):
         leave_columns[1:],
     )
 
-    # Employee dimension: one row per assignment version.
     employees = pd.read_excel(MASTER, sheet_name="employees")
     assignments = pd.read_excel(MASTER, sheet_name="employee_assignments")
 
@@ -234,10 +229,6 @@ def load_dimensions(cur):
             "work_location": employee["work_location"],
             "work_mode": employee["work_mode"],
             "highest_education": employee["highest_education"],
-            "valid_from": effective_from,
-            "valid_to": effective_to,
-            "is_current": effective_to is None,
-            "change_reason": assignment["change_reason"],
         }
 
         employee_rows.append(
@@ -266,20 +257,88 @@ def load_dimensions(cur):
     print("Dimensions loaded.")
 
 
-def load_attendance(cur):
-    print("Loading monthly attendance...")
+def load_daily_attendance(cur):
+    """Load one record per employee per attendance date."""
+    print("Loading daily attendance...")
 
-    df = pd.read_excel(
-        CORTEX, sheet_name="attendance_monthly_features"
+    df = pd.read_excel(MASTER, sheet_name="attendance")
+    keys = date_key_map(cur)
+
+    cur.execute("""
+        SELECT employee_key, employee_id, valid_from, valid_to
+        FROM dw.dim_employee
+        ORDER BY employee_id, valid_from
+    """)
+
+    employee_versions = {}
+    for employee_key, employee_id, valid_from, valid_to in cur.fetchall():
+        employee_versions.setdefault(employee_id, []).append(
+            (employee_key, valid_from, valid_to)
+        )
+
+    rows = []
+
+    for _, row in df.iterrows():
+        attendance_date = clean(row["attendance_date"])
+        employee_id = clean(row["employee_id"])
+
+        employee_key = None
+        for key, valid_from, valid_to in employee_versions.get(employee_id, []):
+            if valid_from <= attendance_date and (
+                valid_to is None or valid_to >= attendance_date
+            ):
+                employee_key = key
+                break
+
+        rows.append((
+            clean(row["attendance_id"]),
+            employee_id,
+            employee_key,
+            keys.get(attendance_date),
+            attendance_date,
+            clean(row["department_id"]),
+            clean(row["weekday"]),
+            clean(row["status"]),
+            clean(row["leave_type_code"]),
+            clean(row["check_in"]),
+            clean(row["check_out"]),
+            clean(row["hours_worked"]),
+            clean(row["overtime_hours"]),
+            clean(row["late_flag"]),
+            clean(row["source"]),
+            clean(row["data_quality_flag"]),
+        ))
+
+    columns = [
+        "attendance_id", "employee_id", "employee_key", "date_key",
+        "attendance_date", "department_id", "weekday", "status",
+        "leave_type_code", "check_in", "check_out", "hours_worked",
+        "overtime_hours", "late_flag", "source", "data_quality_flag",
+    ]
+
+    upsert(
+        cur,
+        "dw.fact_attendance",
+        columns,
+        rows,
+        "attendance_id",
+        columns[1:],
     )
 
+    print(f"Daily attendance rows processed: {len(rows)}")
+
+
+def load_attendance(cur):
+    """Load monthly attendance features from the CortexHR workbook."""
+    print("Loading monthly attendance...")
+
+    df = pd.read_excel(CORTEX, sheet_name="attendance_monthly_features")
     keys = date_key_map(cur)
     rows = []
 
     for _, row in df.iterrows():
         month = clean(row["month"])
-        period_end = pd.Timestamp(month) + pd.offsets.MonthEnd(0)
-        period_end = period_end.date()
+        period_end = (pd.Timestamp(month) + pd.offsets.MonthEnd(0)).date()
 
         employee_key = employee_key_for(
             cur, row["employee_id"], period_end
@@ -316,7 +375,7 @@ def load_attendance(cur):
         "employee_id, period_end_date", columns[1:]
     )
 
-    print(f"Attendance rows processed: {len(rows)}")
+    print(f"Monthly attendance rows processed: {len(rows)}")
 
 
 def load_payroll(cur):
@@ -353,8 +412,7 @@ def load_payroll(cur):
             period_end,
             clean(row["department_id"]),
             clean(row["role_id"]),
-            *[clean(row[column]) for column in numeric_columns[:3]],
-            *[clean(row[column]) for column in numeric_columns[3:]],
+            *[clean(row[column]) for column in numeric_columns],
             clean(row.get("headcount_flag")),
         ))
 
@@ -370,7 +428,6 @@ def load_payroll(cur):
         "headcount_flag"
     ]
 
-    # headcount_flag is optional in the source workbook.
     upsert(
         cur, "dw.fact_payroll", columns, rows,
         "payroll_item_id", columns[1:]
@@ -426,19 +483,16 @@ def load_headcount(cur):
     print("Loading monthly headcount...")
 
     df = pd.read_excel(CORTEX, sheet_name="monthly_headcount_history")
-
-    # The ALL row is a company-wide total, not a department.
     df = df[df["department_id"] != "ALL"].copy()
+
     keys = date_key_map(cur)
     rows = []
 
     for _, row in df.iterrows():
-        month = clean(row["month"])
-        month_start = pd.Timestamp(month).date()
-        date_key = keys.get(month_start)
+        month_start = pd.Timestamp(clean(row["month"])).date()
 
         rows.append((
-            date_key,
+            keys.get(month_start),
             month_start,
             clean(row["department_id"]),
             clean(row["headcount_start"]),
@@ -484,6 +538,7 @@ def main():
         with connection:
             with connection.cursor() as cur:
                 load_dimensions(cur)
+                load_daily_attendance(cur)
                 load_attendance(cur)
                 load_payroll(cur)
                 load_leave(cur)
@@ -492,6 +547,7 @@ def main():
                 cur.execute("""
                     SELECT
                         (SELECT COUNT(*) FROM dw.dim_employee),
+                        (SELECT COUNT(*) FROM dw.fact_attendance),
                         (SELECT COUNT(*) FROM dw.fact_attendance_monthly),
                         (SELECT COUNT(*) FROM dw.fact_payroll),
                         (SELECT COUNT(*) FROM dw.fact_leave),
